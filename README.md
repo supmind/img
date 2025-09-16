@@ -54,11 +54,16 @@ python3 prepare_data.py --data_path /path/to/your/data/
 现在，使用上一步生成的 `triplets.csv` 文件来运行微调脚本 `finetune.py`。
 
 ```bash
-python3 finetune.py --csv_path triplets.csv --epochs 5 --batch_size 32 --learning_rate 0.0001
+# 示例1: 使用默认的 mobilenetv3_large_100 模型进行微调
+python3 finetune.py --csv_path triplets.csv --epochs 5
+
+# 示例2: 尝试使用更精确但更慢的 efficientnet_b1 模型
+python3 finetune.py --csv_path triplets.csv --epochs 5 --model_name efficientnet_b1
 ```
 
+- `--model_name`: (可选) 指定要使用的模型架构。默认为 `mobilenetv3_large_100`。您可以换成其他timm支持的模型，如 `efficientnet_b1` 或 `pit_b_224`。
 - `--csv_path`: **必须提供**，指向 `triplets.csv` 文件。
-- `--epochs`: (可选) 训练轮次，默认为5。根据您的数据量和期望的效果，可以适当调整。
+- `--epochs`: (可选) 训练轮次，默认为5。
 - `--batch_size`: (可选) 批处理大小，默认为32。如果您的内存/显存不足，可以减小此值。
 - `--learning_rate`: (可选) 学习率，默认为 `1e-4`。
 - `--output_weights_path`: (可选) 保存微调后权重的文件名，默认为 `finetuned_head.pth`。
@@ -78,8 +83,12 @@ from feature_extractor import ImageFeatureExtractor
 import torch
 
 # 1. 初始化特征提取器，并加载微调过的权重
+# 重要：这里的model_name必须与您微调时使用的模型一致！
 print("正在初始化微调过的特征提取器...")
-extractor = ImageFeatureExtractor(weights_path='finetuned_head.pth')
+extractor = ImageFeatureExtractor(
+    model_name='mobilenetv3_large_100',  # 或 'efficientnet_b1' 等，取决于您微调了哪个模型
+    weights_path='finetuned_head.pth'
+)
 
 # 2. 提取一张图片的特征
 # 这里的特征向量会比未经微调的模型更懂您的数据

@@ -18,8 +18,8 @@ def finetune(args):
     # 2. 加载模型和图像变换
     # 初始化我们之前创建的特征提取器
     # 注意：这里加载的是预训练模型，还没有经过微调
-    print("正在加载预训练模型...")
-    extractor = ImageFeatureExtractor(output_dim=256)
+    print(f"正在加载预训练模型: {args.model_name}...")
+    extractor = ImageFeatureExtractor(model_name=args.model_name, output_dim=256)
     model = extractor.model
     head = extractor.projection_head
 
@@ -96,6 +96,7 @@ def finetune(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="微调特征提取模型的投影层。")
+    parser.add_argument("--model_name", type=str, default="mobilenetv3_large_100", help="要使用的timm模型名称。")
     parser.add_argument("--csv_path", type=str, required=True, help="包含三元组数据的CSV文件路径。")
     parser.add_argument("--epochs", type=int, default=5, help="训练的轮次。")
     parser.add_argument("--batch_size", type=int, default=32, help="每个批次的样本数。")
