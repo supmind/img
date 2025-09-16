@@ -6,31 +6,45 @@ import csv
 class TripletDataset(Dataset):
     """
     一个自定义的PyTorch数据集，用于加载三元组训练数据。
-    它从一个CSV文件中读取三元组的路径，并加载相应的图片。
+    它可以从一个列表或CSV文件中加载三元组。
     """
-    def __init__(self, csv_file, transform=None):
+    def __init__(self, triplets, transform=None):
         """
-        初始化数据集。
+        直接用一个三元组列表来初始化数据集。
+
+        :param triplets: 一个列表，其中每个元素是 [anchor_path, positive_path, negative_path]。
+        :param transform: 应用于每张图片上的torchvision变换。
+        """
+        self.triplets = triplets
+        self.transform = transform
+        if not self.triplets:
+            print("警告: 提供给数据集的三元组列表为空。")
+
+    @classmethod
+    def from_csv(cls, csv_file, transform=None):
+        """
+        从CSV文件加载数据来创建数据集实例。
 
         :param csv_file: 包含三元组路径的CSV文件路径。
                          CSV文件应包含'anchor', 'positive', 'negative'三列，并有表头。
         :param transform: 应用于每张图片上的torchvision变换。
         """
-        self.triplets = []
+        triplets = []
         try:
             with open(csv_file, 'r', encoding='utf-8') as f:
                 reader = csv.reader(f)
                 next(reader)  # 跳过表头
                 for row in reader:
                     if len(row) == 3:
-                        self.triplets.append(row)
+                        triplets.append(row)
         except FileNotFoundError:
             print(f"错误: CSV文件未找到于 {csv_file}")
             raise
 
-        self.transform = transform
-        if not self.triplets:
+        if not triplets:
             print(f"警告: 在 {csv_file} 中没有找到任何三元组数据。")
+
+        return cls(triplets, transform)
 
     def __len__(self):
         """
@@ -50,9 +64,9 @@ class TripletDataset(Dataset):
 
         try:
             # 加载图片并确保为RGB格式
-            anchor_img = Image.open("/content/data/"+anchor_path).convert('RGB')
-            positive_img = Image.open("/content/data/"+positive_path).convert('RGB')
-            negative_img = Image.open("/content/data/"+negative_path).convert('RGB')
+            anchor_img = Image.open(anchor_path).convert('RGB')
+            positive_img = Image.open(positive_path).convert('RGB')
+            negative_img = Image.open(negative_path).convert('RGB')
         except FileNotFoundError as e:
             print(f"警告: 无法加载图片 {e}。正在尝试加载下一个样本作为替代。")
             # 处理文件丢失的一个简单方法是加载下一个样本。
