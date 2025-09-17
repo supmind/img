@@ -6,10 +6,30 @@ from tqdm import tqdm
 import argparse
 import csv
 import random
+import os
+from peft import LoraConfig, get_peft_model
+
 
 # 导入我们自己编写的模块
 from feature_extractor import ImageFeatureExtractor
 from triplet_dataset import TripletDataset
+
+def find_lora_target_modules(model, lora_rank):
+    """
+    自动查找模型中适合应用LoRA的模块。
+    此函数遍历主干模型中的所有模块，并返回一个包含所有
+    `nn.Linear` 和兼容的 `nn.Conv2d` 模块名称的列表。
+    兼容性意味着对于分组卷积，LoRA的rank必须能被groups数整除。
+    """
+    target_modules = []
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Linear):
+            target_modules.append(name)
+        elif isinstance(module, nn.Conv2d):
+            if lora_rank % module.groups == 0:
+                target_modules.append(name)
+    print(f"找到 {len(target_modules)} 个可应用LoRA的目标模块。")
+    return target_modules
 
 def validate(model, head, val_loader, device):
     """在验证集上评估模型"""
@@ -62,10 +82,22 @@ def finetune(args):
     model.to(device)
     head.to(device)
 
-    # 冻结主干网络的权重
-    print("正在冻结主干网络参数...")
-    for param in model.parameters():
-        param.requires_grad = False
+    # 应用PEFT (LoRA)配置
+    print("正在应用PEFT (LoRA)配置...")
+    # 自动查找可应用LoRA的模块
+    target_modules = find_lora_target_modules(model, args.lora_r)
+    lora_config = LoraConfig(
+        r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        target_modules=target_modules,
+        lora_dropout=args.lora_dropout,
+        bias="none",
+    )
+    model = get_peft_model(model, lora_config)
+    print("PEFT模型创建成功:")
+    model.print_trainable_parameters()
+
+    # 确保投影头仍然是可训练的
     for param in head.parameters():
         param.requires_grad = True
 
@@ -120,7 +152,11 @@ def finetune(args):
 
     # 4. 定义损失函数和优化器
     loss_fn = nn.TripletMarginLoss(margin=args.margin)
-    optimizer = optim.AdamW(head.parameters(), lr=args.learning_rate)
+
+    # 将投影头和LoRA适配器的可训练参数一起传给优化器
+    trainable_params = list(head.parameters()) + [p for p in model.parameters() if p.requires_grad]
+    optimizer = optim.AdamW(trainable_params, lr=args.learning_rate)
+    print(f"优化器将训练 {len(trainable_params)} 个参数张量。")
 
     print("--- 开始微调 ---")
     best_val_acc = 0.0
@@ -162,8 +198,10 @@ def finetune(args):
             # 保存最佳模型
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-                print(f"✨ 新的最佳验证准确率: {best_val_acc:.2f}%. 正在保存模型至 {args.output_weights_path}...")
-                torch.save(head.state_dict(), args.output_weights_path)
+                print(f"✨ 新的最佳验证准确率: {best_val_acc:.2f}%. 正在保存模型至 {args.output_dir}...")
+                os.makedirs(args.output_dir, exist_ok=True)
+                model.save_pretrained(args.output_dir)
+                torch.save(head.state_dict(), os.path.join(args.output_dir, "head_weights.pth"))
         else:
              print(f"Epoch {epoch+1}/{args.epochs} - Avg Train Loss: {avg_loss:.4f}")
 
@@ -171,8 +209,10 @@ def finetune(args):
 
     # 如果没有验证集，在训练结束后保存最终模型
     if not val_loader:
-        print(f"正在保存最终模型权重至: {args.output_weights_path}")
-        torch.save(head.state_dict(), args.output_weights_path)
+        print(f"正在保存最终模型权重至: {args.output_dir}")
+        os.makedirs(args.output_dir, exist_ok=True)
+        model.save_pretrained(args.output_dir)
+        torch.save(head.state_dict(), os.path.join(args.output_dir, "head_weights.pth"))
 
     print("任务完成。")
 
@@ -184,9 +224,14 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=32, help="每个批次的样本数。")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="优化器的学习率。")
     parser.add_argument("--margin", type=float, default=1.0, help="TripletLoss的边际值。")
-    parser.add_argument("--output_weights_path", type=str, default="finetuned_head.pth", help="保存最佳模型权重的路径。")
+    parser.add_argument("--output_dir", type=str, default="finetuned_model", help="保存微调后模型权重的目录。")
     parser.add_argument("--num_workers", type=int, default=2, help="数据加载器使用的工作进程数。")
     parser.add_argument("--val_split", type=float, default=0.1, help="从CSV中用于验证的比例(0.0到1.0之间)。设为0则禁用验证。")
+
+    # LoRA 相关参数
+    parser.add_argument("--lora_r", type=int, default=16, help="LoRA的秩。")
+    parser.add_argument("--lora_alpha", type=int, default=16, help="LoRA的alpha值。")
+    parser.add_argument("--lora_dropout", type=float, default=0.1, help="LoRA的dropout率。")
 
     args = parser.parse_args()
     if args.val_split < 0 or args.val_split >= 1.0:
