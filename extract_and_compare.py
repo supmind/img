@@ -139,7 +139,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="使用微调后的模型提取图像特征，并计算它们之间的余弦相似度。")
     parser.add_argument("--image_dir", type=str, required=True, help="包含要处理的图像的目录。")
     parser.add_argument("--model_dir", type=str, default="finetuned_model", help="包含微调模型（LoRA适配器和head_weights.pth）的目录。")
-    parser.add_argument("--model_name", type=str, default="mobilenetv3_large_100", help="用于微调的timm基础模型名称。")
+    parser.add_argument("--model_name", type=str, default="mobilenetv4_conv_medium.e500_r224_in1k", help="用于微调的timm基础模型名称。")
     parser.add_argument("--output_dim", type=int, default=256, help="投影头的输出维度。")
 
     args = parser.parse_args()

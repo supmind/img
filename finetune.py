@@ -74,19 +74,27 @@ def finetune(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}")
 
-    # 2. 加载模型和图像变换
+    # 2. 加载模型
     print(f"正在加载预训练模型: {args.model_name}...")
+    # 注意：我们只从extractor获取模型和投影头，不再使用它的transform
     extractor = ImageFeatureExtractor(model_name=args.model_name, output_dim=256)
     model = extractor.model
     head = extractor.projection_head
-    transform = extractor.transform
+
+    # 导入timm以创建transform
+    import timm.data
+
+    # 为训练集和验证集创建独立的图像变换
+    data_config = timm.data.resolve_model_data_config(model)
+    train_transform = timm.data.create_transform(**data_config, is_training=True)
+    val_transform = timm.data.create_transform(**data_config, is_training=False)
+    print("已为训练集启用数据增强 (random crops, flips, etc.)。")
 
     model.to(device)
     head.to(device)
 
     # 应用PEFT (LoRA)配置
     print("正在应用PEFT (LoRA)配置...")
-    # 自动查找可应用LoRA的模块
     target_modules = find_lora_target_modules(model, args.lora_r)
     lora_config = LoraConfig(
         r=args.lora_r,
@@ -105,14 +113,10 @@ def finetune(args):
 
     # 3. 准备数据集和数据加载器
     print("正在准备数据集...")
-
-    # 3. 准备数据集和数据加载器 (重构后的逻辑)
-    print("正在准备数据集...")
     try:
         with open(args.csv_path, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
-            header = next(reader) # 读取表头
-            # 检查表头是否是有效路径，如果不是，则正常读取；如果是，则将其包含在数据中
+            header = next(reader)
             if header[0].lower().endswith(('.jpg', '.jpeg', '.png')):
                 all_triplets = [header] + [row for row in reader if len(row) == 3]
             else:
@@ -141,17 +145,16 @@ def finetune(args):
             train_triplets = all_triplets
         else:
             print(f"创建验证集，包含 {len(val_triplets)} 个三元组。")
-            val_dataset = TripletDataset(triplets=val_triplets, transform=transform)
+            val_dataset = TripletDataset(triplets=val_triplets, transform=val_transform)
             val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     else:
         train_triplets = all_triplets
         print("未启用验证，所有数据将用于训练。")
 
     # 为训练集创建 LabelledImageDataset
-    # 将训练三元组中的所有图像路径平铺成一个列表
     train_image_paths = [path for triplet in train_triplets for path in triplet]
     print(f"创建训练集，使用来自 {len(train_triplets)} 个三元组的图像。")
-    train_dataset = LabelledImageDataset(image_path_list=train_image_paths, transform=transform)
+    train_dataset = LabelledImageDataset(image_path_list=train_image_paths, transform=train_transform)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
 
     # 4. 定义损失函数和优化器
