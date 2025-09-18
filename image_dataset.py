@@ -51,7 +51,7 @@ class LabelledImageDataset(Dataset):
         """
         image_path = self.images[idx]
         try:
-            image = Image.open(image_path).convert("RGB")
+            image = Image.open("/content/data/"+image_path).convert("RGB")
         except FileNotFoundError:
             print(f"警告: 找不到文件 {image_path}，将返回一个空张量和-1标签。")
             # 返回一个占位符和无效标签，需要在数据加载循环中处理
