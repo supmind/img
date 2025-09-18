@@ -13,6 +13,8 @@ from peft import LoraConfig, get_peft_model
 # 导入我们自己编写的模块
 from feature_extractor import ImageFeatureExtractor
 from triplet_dataset import TripletDataset
+from image_dataset import LabelledImageDataset
+from pytorch_metric_learning import losses
 
 def find_lora_target_modules(model, lora_rank):
     """
@@ -104,23 +106,22 @@ def finetune(args):
     # 3. 准备数据集和数据加载器
     print("正在准备数据集...")
 
-    # 从CSV加载所有数据
+    # 3. 准备数据集和数据加载器 (重构后的逻辑)
+    print("正在准备数据集...")
     try:
         with open(args.csv_path, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
-            # 兼容没有表头的情况
-            try:
-                first_row = next(reader)
-                all_triplets = [first_row] + [row for row in reader if len(row) == 3]
-                # 检查表头是否是路径，如果不是，则认为它不是表头
-                if not all_triplets[0][0].lower().endswith(('.jpg', '.jpeg', '.png')):
-                     all_triplets = all_triplets[1:] # 真正的表头，跳过
-            except StopIteration:
-                 all_triplets = []
-
+            header = next(reader) # 读取表头
+            # 检查表头是否是有效路径，如果不是，则正常读取；如果是，则将其包含在数据中
+            if header[0].lower().endswith(('.jpg', '.jpeg', '.png')):
+                all_triplets = [header] + [row for row in reader if len(row) == 3]
+            else:
+                all_triplets = [row for row in reader if len(row) == 3]
     except FileNotFoundError:
         print(f"错误: CSV文件未找到于 {args.csv_path}")
         return
+    except StopIteration:
+        all_triplets = []
 
     if not all_triplets:
         print(f"错误: 在 {args.csv_path} 中没有找到任何三元组数据。")
@@ -128,6 +129,7 @@ def finetune(args):
 
     random.shuffle(all_triplets)
 
+    # 根据 val_split 划分训练集和验证集
     val_loader = None
     if args.val_split > 0 and args.val_split < 1.0:
         split_idx = int(len(all_triplets) * (1 - args.val_split))
@@ -135,23 +137,26 @@ def finetune(args):
         val_triplets = all_triplets[split_idx:]
 
         if not val_triplets:
-             print("警告: 验证集为空，请检查val_split值或数据量。将使用所有数据进行训练。")
-             train_triplets = all_triplets
+            print("警告: 验证集为空，将使用所有数据进行训练。")
+            train_triplets = all_triplets
         else:
-            print(f"数据集划分: {len(train_triplets)} 训练样本, {len(val_triplets)} 验证样本")
+            print(f"创建验证集，包含 {len(val_triplets)} 个三元组。")
             val_dataset = TripletDataset(triplets=val_triplets, transform=transform)
             val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-
-        train_dataset = TripletDataset(triplets=train_triplets, transform=transform)
-
     else:
-        print(f"使用所有 {len(all_triplets)} 样本进行训练，无验证集。")
-        train_dataset = TripletDataset(triplets=all_triplets, transform=transform)
+        train_triplets = all_triplets
+        print("未启用验证，所有数据将用于训练。")
 
+    # 为训练集创建 LabelledImageDataset
+    # 将训练三元组中的所有图像路径平铺成一个列表
+    train_image_paths = [path for triplet in train_triplets for path in triplet]
+    print(f"创建训练集，使用来自 {len(train_triplets)} 个三元组的图像。")
+    train_dataset = LabelledImageDataset(image_path_list=train_image_paths, transform=transform)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
 
     # 4. 定义损失函数和优化器
-    loss_fn = nn.TripletMarginLoss(margin=args.margin)
+    print("使用 MultiSimilarityLoss 作为损失函数。")
+    loss_fn = losses.MultiSimilarityLoss()
 
     # 将投影头和LoRA适配器的可训练参数一起传给优化器
     trainable_params = list(head.parameters()) + [p for p in model.parameters() if p.requires_grad]
@@ -170,16 +175,23 @@ def finetune(args):
         for i, batch in enumerate(progress_bar):
             # 健壮性检查，以防dataloader返回None
             if batch is None: continue
-            anchor_img, positive_img, negative_img = batch
-            anchor_img, positive_img, negative_img = anchor_img.to(device), positive_img.to(device), negative_img.to(device)
+
+            images, labels = batch
+
+            # 过滤掉加载失败的图像 (在LabelledImageDataset中标签为-1)
+            valid_indices = [i for i, label in enumerate(labels) if label != -1]
+            if not valid_indices:
+                print("警告: 一个批次中的所有图像都加载失败，已跳过。")
+                continue
+
+            images = images[valid_indices].to(device)
+            labels = labels[valid_indices].to(device)
 
             optimizer.zero_grad()
 
-            anchor_emb = head(model(anchor_img))
-            positive_emb = head(model(positive_img))
-            negative_emb = head(model(negative_img))
+            embeddings = head(model(images))
 
-            loss = loss_fn(anchor_emb, positive_emb, negative_emb)
+            loss = loss_fn(embeddings, labels)
             loss.backward()
             optimizer.step()
 
