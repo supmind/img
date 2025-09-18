@@ -64,9 +64,9 @@ class TripletDataset(Dataset):
 
         try:
             # 加载图片并确保为RGB格式
-            anchor_img = Image.open(anchor_path).convert('RGB')
-            positive_img = Image.open(positive_path).convert('RGB')
-            negative_img = Image.open(negative_path).convert('RGB')
+            anchor_img = Image.open("/content/data"+anchor_path).convert('RGB')
+            positive_img = Image.open("/content/data"+positive_path).convert('RGB')
+            negative_img = Image.open("/content/data"+negative_path).convert('RGB')
         except FileNotFoundError as e:
             print(f"警告: 无法加载图片 {e}。正在尝试加载下一个样本作为替代。")
             # 处理文件丢失的一个简单方法是加载下一个样本。
