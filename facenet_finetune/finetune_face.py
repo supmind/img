@@ -190,7 +190,21 @@ def main(args):
 
     # --- Model, Optimizer ---
     model = get_finetune_model().to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+
+    if args.freeze_backbone:
+        print("Freezing backbone layers. Only training the new head.")
+        # Freeze all parameters
+        for param in model.parameters():
+            param.requires_grad = False
+        # Unfreeze the new head (last_linear and last_bn)
+        for param in model.backbone.last_linear.parameters():
+            param.requires_grad = True
+        for param in model.backbone.last_bn.parameters():
+            param.requires_grad = True
+
+    # Create optimizer with only trainable parameters
+    trainable_params = filter(lambda p: p.requires_grad, model.parameters())
+    optimizer = torch.optim.Adam(trainable_params, lr=args.learning_rate)
 
     # --- Training & Validation Loop ---
     best_val_acc = 0.0
@@ -246,6 +260,7 @@ if __name__ == '__main__':
 
     # Training parameters
     parser.add_argument('--num_epochs', type=int, default=15, help="Number of training epochs.")
+    parser.add_argument('--freeze_backbone', action='store_true', help="Freeze backbone layers and only train the new head.")
     parser.add_argument('--classes_per_batch', type=int, default=32, help="Number of distinct classes (persons) per batch.")
     parser.add_argument('--samples_per_class', type=int, default=4, help="Number of samples (images) per class in a batch.")
     parser.add_argument('--learning_rate', type=float, default=1e-4, help="Learning rate for the optimizer.")
