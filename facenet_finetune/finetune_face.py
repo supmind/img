@@ -78,6 +78,71 @@ class BalancedBatchSampler(BatchSampler):
         return len(self.dataset) // self.batch_size
 
 
+class PairDataset(Dataset):
+    """
+    A generic dataset for loading image pairs from a CSV file.
+    The CSV file should have three columns: path1, path2, is_same.
+    """
+    def __init__(self, csv_file, transform=None):
+        self.dataframe = pd.read_csv(csv_file)
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.dataframe)
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        row = self.dataframe.iloc[idx]
+        img1_path, img2_path = row['path1'], row['path2']
+        is_same = int(row['is_same'])
+
+        img1 = Image.open(img1_path).convert('RGB')
+        img2 = Image.open(img2_path).convert('RGB')
+
+        if self.transform:
+            img1 = self.transform(img1)
+            img2 = self.transform(img2)
+
+        return img1, img2, is_same
+
+def calculate_accuracy(threshold, dist, actual_issame):
+    predict_issame = np.less(dist, threshold)
+    tp = np.sum(np.logical_and(predict_issame, actual_issame))
+    fp = np.sum(np.logical_and(predict_issame, np.logical_not(actual_issame)))
+    tn = np.sum(np.logical_and(np.logical_not(predict_issame), np.logical_not(actual_issame)))
+    fn = np.sum(np.logical_and(np.logical_not(predict_issame), actual_issame))
+
+    accuracy = float(tp + tn) / dist.size
+    return accuracy
+
+def evaluate(model, val_loader, device):
+    """Evaluates the model on a pairs dataset."""
+    model.eval()
+    distances, labels = [], []
+
+    with torch.no_grad():
+        for img1, img2, label in tqdm(val_loader, desc="Validating"):
+            img1, img2 = img1.to(device), img2.to(device)
+
+            emb1 = model(img1)
+            emb2 = model(img2)
+
+            dist = (emb1 - emb2).pow(2).sum(1).cpu().numpy()
+            distances.extend(dist)
+            labels.extend(label.cpu().numpy())
+
+    distances = np.array(distances)
+    labels = np.array(labels)
+
+    thresholds = np.arange(0, 4, 0.01)
+    accuracies = [calculate_accuracy(t, distances, labels) for t in thresholds]
+
+    best_acc = np.max(accuracies)
+    return best_acc
+
+
 def batch_hard_triplet_loss(labels, embeddings, margin, device):
     """
     Computes the batch-hard triplet loss.
@@ -104,66 +169,83 @@ def main(args):
     print(f"Running on device: {device}")
 
     # --- Data Preparation ---
-    transform = transforms.Compose([
+    train_transform = transforms.Compose([
         transforms.Resize((160, 160)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
     ])
 
-    dataset = VGGFace2Dataset(csv_file=args.csv_path, transform=transform)
+    val_transform = transforms.Compose([
+        transforms.Resize((160, 160)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    ])
 
-    # Use our custom sampler
-    batch_sampler = BalancedBatchSampler(dataset, n_classes=args.classes_per_batch, n_samples=args.samples_per_class)
-    dataloader = DataLoader(dataset, batch_sampler=batch_sampler, num_workers=args.num_workers)
+    train_dataset = VGGFace2Dataset(csv_file=args.csv_path, transform=train_transform)
 
-    # --- Model, Optimizer, Loss ---
+    # Use our custom sampler for training
+    batch_sampler = BalancedBatchSampler(train_dataset, n_classes=args.classes_per_batch, n_samples=args.samples_per_class)
+    train_loader = DataLoader(train_dataset, batch_sampler=batch_sampler, num_workers=args.num_workers)
+
+    # --- Model, Optimizer ---
     model = get_finetune_model().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
 
-    # We implement the loss function manually for batch-hard mining
-    # triplet_loss_fn = nn.TripletMarginLoss(margin=args.margin, p=2)
+    # --- Training & Validation Loop ---
+    best_val_acc = 0.0
 
-    # --- Training Loop ---
     for epoch in range(args.num_epochs):
+        # Training phase
         model.train()
         total_loss = 0
 
-        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{args.num_epochs}")
+        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.num_epochs} [Training]")
         for images, labels in progress_bar:
             images, labels = images.to(device), labels.to(device)
 
             optimizer.zero_grad()
-
             embeddings = model(images)
-
             loss = batch_hard_triplet_loss(labels, embeddings, args.margin, device)
-
             loss.backward()
             optimizer.step()
 
             total_loss += loss.item()
             progress_bar.set_postfix(loss=f'{loss.item():.4f}')
 
-        avg_loss = total_loss / len(dataloader)
-        print(f"Epoch {epoch+1}/{args.num_epochs}, Average Loss: {avg_loss:.4f}")
+        avg_loss = total_loss / len(train_loader)
+        print(f"Epoch {epoch+1}/{args.num_epochs}, Average Training Loss: {avg_loss:.4f}")
 
-    # --- Save Model ---
-    if not os.path.exists(os.path.dirname(args.save_path)):
-        os.makedirs(os.path.dirname(args.save_path))
+        # Validation phase
+        if args.val_csv_path:
+            val_dataset = PairDataset(csv_file=args.val_csv_path, transform=val_transform)
+            val_loader = DataLoader(val_dataset, batch_size=args.classes_per_batch * args.samples_per_class, shuffle=False, num_workers=args.num_workers)
 
-    torch.save(model.state_dict(), args.save_path)
-    print(f"Finetuned model saved to {args.save_path}")
+            val_accuracy = evaluate(model, val_loader, device)
+            print(f"Validation Accuracy: {val_accuracy:.4f}")
+
+            if val_accuracy > best_val_acc:
+                best_val_acc = val_accuracy
+                print(f"*** New best validation accuracy: {best_val_acc:.4f}. Saving model... ***")
+                if not os.path.exists(os.path.dirname(args.save_path)):
+                    os.makedirs(os.path.dirname(args.save_path))
+                torch.save(model.state_dict(), args.save_path)
+                print(f"Best model saved to {args.save_path}")
+
+    print("\n--- Training Complete ---")
+    if args.val_csv_path:
+        print(f"Final best validation accuracy: {best_val_acc:.4f}")
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Finetune Facenet model with 128d embeddings")
 
     parser.add_argument('--csv_path', type=str, required=True, help="Path to the training CSV file.")
-    parser.add_argument('--save_path', type=str, default='models/facenet_128d.pt', help="Path to save the finetuned model.")
+    parser.add_argument('--val_csv_path', type=str, default=None, help="Path to the validation pairs CSV file.")
+    parser.add_argument('--save_path', type=str, default='models/facenet_128d_best.pt', help="Path to save the best finetuned model.")
 
     # Training parameters
-    parser.add_argument('--num_epochs', type=int, default=10, help="Number of training epochs.")
+    parser.add_argument('--num_epochs', type=int, default=15, help="Number of training epochs.")
     parser.add_argument('--classes_per_batch', type=int, default=32, help="Number of distinct classes (persons) per batch.")
     parser.add_argument('--samples_per_class', type=int, default=4, help="Number of samples (images) per class in a batch.")
     parser.add_argument('--learning_rate', type=float, default=1e-4, help="Learning rate for the optimizer.")
